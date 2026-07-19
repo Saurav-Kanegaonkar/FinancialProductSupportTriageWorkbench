@@ -1,0 +1,5 @@
+scenario,top_25_overlap_with_current,avg_score,sla_breach_rate,vendor_blocked_share,avg_customer_effort,review_required_share
+Current review weights,25,110.78,1.0,0.56,5.01,0.92
+SLA-heavy escalation,22,113.33,1.0,0.48,4.92,0.84
+User-impact heavy,17,115.65,1.0,0.44,5.45,0.8
+Vendor-escalation heavy,16,109.43,1.0,0.92,4.62,1.0

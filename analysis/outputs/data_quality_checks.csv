@@ -1,0 +1,6 @@
+table_name,row_count,column_count,primary_key,duplicate_key_count,missing_cell_count
+support_issues,1100,14,issue_id,0,0
+product_requirements,120,7,requirement_id,0,0
+test_requests,180,7,test_request_id,0,0
+user_groups,5,5,user_group,0,0
+vendor_dependencies,12,6,vendor_id,0,0

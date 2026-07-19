@@ -1,0 +1,21 @@
+issue_id,application,user_group,status,severity,triage_score,hours_open,sla_breached,recurrence_count,affected_users,customer_effort_score,vendor_blocked,release_id,not_ready_tests
+HTS-0585,Public Finance CRM,Sales Support,In Progress,P1,125.1,37,1,3,89,6.4,1,REL-08,13
+HTS-0255,Public Finance CRM,Financial Advisors,Open,P1,123.0,22,1,2,137,6.1,1,REL-06,16
+HTS-0627,Public Finance CRM,Operations,Open,P1,121.1,40,1,5,60,6.7,0,REL-02,9
+HTS-0517,Advisor Portal,Financial Advisors,In Progress,P1,115.4,38,1,2,156,5.6,0,REL-06,16
+HTS-1002,Public Finance CRM,Financial Advisors,In Progress,P2,115.2,161,1,2,150,6.4,1,REL-03,15
+HTS-0185,Trade Support,Financial Advisors,Open,P1,114.9,136,1,0,161,4.6,1,REL-05,24
+HTS-0408,Data Entitlements,Public Finance,In Progress,P2,113.6,88,1,3,169,3.9,1,REL-02,9
+HTS-0270,Public Finance CRM,Operations,In Progress,P2,111.4,69,1,2,162,4.9,1,REL-02,9
+HTS-0845,Client Reporting,Financial Advisors,Open,P1,111.2,86,1,1,120,3.4,1,REL-06,16
+HTS-0809,Public Finance CRM,Operations,Vendor Pending,P1,110.4,66,1,2,109,5.5,0,REL-06,16
+HTS-0130,Data Entitlements,Financial Advisors,Testing,P2,110.0,83,1,3,176,5.8,0,REL-02,9
+HTS-1034,Public Finance CRM,Public Finance,In Progress,P2,109.8,105,1,5,66,3.4,1,REL-06,16
+HTS-0620,Client Reporting,Operations,Testing,P1,109.0,69,1,1,174,4.2,0,REL-07,15
+HTS-0707,Public Finance CRM,Sales Support,Testing,P1,108.0,72,1,0,126,6.8,0,REL-05,24
+HTS-0125,Data Entitlements,Compliance,Open,P2,107.8,44,1,5,125,5.1,1,REL-02,9
+HTS-0303,Compliance Workflow,Financial Advisors,Open,P2,107.6,143,1,1,123,6.1,1,REL-02,9
+HTS-0561,Compliance Workflow,Operations,Testing,P1,107.6,55,1,1,85,6.7,0,REL-04,22
+HTS-0943,Compliance Workflow,Compliance,Testing,P1,107.3,24,1,1,121,5.4,0,REL-02,9
+HTS-0577,Public Finance CRM,Compliance,Vendor Pending,P1,107.1,51,1,1,70,3.7,1,REL-03,15
+HTS-0774,Advisor Portal,Public Finance,Open,P2,106.9,72,1,5,68,5.7,0,REL-03,15

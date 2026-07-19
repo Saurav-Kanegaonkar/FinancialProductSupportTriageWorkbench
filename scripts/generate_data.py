@@ -32,6 +32,8 @@ USER_GROUPS = [
 ]
 SEVERITY_WEIGHT = {"P1": 40, "P2": 28, "P3": 14, "P4": 6}
 ACTIVE_STATUSES = {"Open", "In Progress", "Vendor Pending", "Testing"}
+SEVERITY_ORDER = ["P1", "P2", "P3", "P4"]
+STATUS_ORDER = ["Open", "In Progress", "Vendor Pending", "Testing", "Closed"]
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
@@ -152,6 +154,218 @@ def score_issue(row: dict) -> float:
     return round(score, 2)
 
 
+def scenario_score(row: pd.Series, scenario: dict) -> float:
+    sla_ratio = float(row["hours_open"]) / float(row["sla_hours"])
+    score = SEVERITY_WEIGHT[row["severity"]] * scenario["severity_multiplier"]
+    score += min(scenario["sla_cap"], sla_ratio * scenario["sla_scale"])
+    score += int(row["recurrence_count"]) * scenario["recurrence_weight"]
+    score += min(scenario["affected_cap"], int(row["affected_users"]) / scenario["affected_divisor"])
+    score += float(row["customer_effort_score"]) * scenario["effort_weight"]
+    score += scenario["vendor_weight"] if int(row["vendor_blocked"]) else 0
+    return round(score, 2)
+
+
+def top_n_metrics(df: pd.DataFrame, score_col: str, n: int = 100) -> dict:
+    selected = df[df["active_flag"]].sort_values(score_col, ascending=False).head(n)
+    total_required = max(1, int(df["review_required"].sum()))
+    captured = int(selected["review_required"].sum())
+    return {
+        "method": score_col,
+        "selected_items": len(selected),
+        "review_required_captured": captured,
+        "precision_at_100": round(captured / max(1, len(selected)), 3),
+        "recall_at_100": round(captured / total_required, 3),
+        "vendor_blocked_share_at_100": round(selected["vendor_blocked"].mean(), 3),
+        "avg_customer_effort_at_100": round(selected["customer_effort_score"].mean(), 2),
+        "avg_sla_breach_rate_at_100": round(selected["sla_breached"].mean(), 3),
+    }
+
+
+def write_analysis_depth_outputs(ranked: list[dict], release_rows: list[dict]) -> None:
+    issues = pd.DataFrame(ranked)
+    releases = pd.DataFrame(release_rows)
+    issues["active_flag"] = issues["status"].isin(ACTIVE_STATUSES)
+    issues = issues.merge(
+        releases[["release_id", "pass_rate_gap", "not_ready_tests", "open_defects"]],
+        on="release_id",
+        how="left",
+    )
+    high_release_risk = issues["not_ready_tests"] >= issues["not_ready_tests"].quantile(0.75)
+    issues["review_required"] = (
+        issues["active_flag"]
+        & (
+            ((issues["sla_breached"] == 1) & (issues["recurrence_count"] >= 2))
+            | (issues["severity"].isin(["P1", "P2"]) & (issues["vendor_blocked"] == 1))
+            | ((issues["customer_effort_score"] >= 6.0) & (issues["affected_users"] >= 100))
+            | (high_release_risk & issues["severity"].isin(["P1", "P2"]))
+        )
+    ).astype(int)
+    issues["severity_sla_rule_score"] = issues["severity"].map(SEVERITY_WEIGHT) + issues["sla_breached"] * 30 + issues["vendor_blocked"] * 8
+
+    segment_summary = (
+        issues[issues["active_flag"]]
+        .groupby(["application", "user_group"])
+        .agg(
+            active_issue_count=("issue_id", "count"),
+            avg_triage_score=("triage_score", "mean"),
+            sla_breach_rate=("sla_breached", "mean"),
+            vendor_blocked_share=("vendor_blocked", "mean"),
+            avg_customer_effort=("customer_effort_score", "mean"),
+            review_required_rate=("review_required", "mean"),
+        )
+        .reset_index()
+        .round(3)
+        .sort_values(["avg_triage_score", "active_issue_count"], ascending=[False, False])
+    )
+    segment_summary.to_csv(OUT / "eda_segment_summary.csv", index=False, lineterminator="\n")
+
+    data_quality_rows = []
+    source_tables = {
+        "support_issues": DATA / "support_issues.csv",
+        "product_requirements": DATA / "product_requirements.csv",
+        "test_requests": DATA / "test_requests.csv",
+        "user_groups": DATA / "user_groups.csv",
+        "vendor_dependencies": DATA / "vendor_dependencies.csv",
+    }
+    key_columns = {
+        "support_issues": "issue_id",
+        "product_requirements": "requirement_id",
+        "test_requests": "test_request_id",
+        "user_groups": "user_group",
+        "vendor_dependencies": "vendor_id",
+    }
+    for table_name, path in source_tables.items():
+        table = pd.read_csv(path)
+        key = key_columns[table_name]
+        data_quality_rows.append(
+            {
+                "table_name": table_name,
+                "row_count": len(table),
+                "column_count": len(table.columns),
+                "primary_key": key,
+                "duplicate_key_count": int(table[key].duplicated().sum()),
+                "missing_cell_count": int(table.isna().sum().sum()),
+            }
+        )
+    pd.DataFrame(data_quality_rows).to_csv(OUT / "data_quality_checks.csv", index=False, lineterminator="\n")
+
+    driver_cols = [
+        "triage_score",
+        "hours_open",
+        "sla_breached",
+        "recurrence_count",
+        "affected_users",
+        "customer_effort_score",
+        "vendor_blocked",
+        "pass_rate_gap",
+        "not_ready_tests",
+    ]
+    issues[driver_cols].corr(numeric_only=True).round(3).to_csv(OUT / "driver_correlations.csv", lineterminator="\n")
+
+    q1 = issues["triage_score"].quantile(0.25)
+    q3 = issues["triage_score"].quantile(0.75)
+    iqr_threshold = q3 + 1.5 * (q3 - q1)
+    outliers = (
+        issues[(issues["active_flag"]) & (issues["triage_score"] >= iqr_threshold)]
+        .sort_values("triage_score", ascending=False)
+        .head(25)
+    )
+    outliers[
+        [
+            "issue_id",
+            "application",
+            "user_group",
+            "status",
+            "severity",
+            "triage_score",
+            "hours_open",
+            "sla_breached",
+            "recurrence_count",
+            "affected_users",
+            "customer_effort_score",
+            "vendor_blocked",
+            "release_id",
+            "not_ready_tests",
+        ]
+    ].to_csv(OUT / "triage_score_outliers.csv", index=False, lineterminator="\n")
+
+    benchmark = pd.DataFrame(
+        [
+            top_n_metrics(issues, "severity_sla_rule_score"),
+            top_n_metrics(issues, "triage_score"),
+        ]
+    )
+    benchmark["method"] = benchmark["method"].map(
+        {
+            "severity_sla_rule_score": "Severity + SLA baseline",
+            "triage_score": "Multi-signal triage score",
+        }
+    )
+    benchmark.to_csv(OUT / "model_vs_rule_benchmark.csv", index=False, lineterminator="\n")
+
+    scenarios = {
+        "Current review weights": {
+            "severity_multiplier": 1.0,
+            "sla_scale": 12,
+            "sla_cap": 35,
+            "recurrence_weight": 4,
+            "affected_divisor": 10,
+            "affected_cap": 18,
+            "effort_weight": 3,
+            "vendor_weight": 10,
+        },
+        "SLA-heavy escalation": {
+            "severity_multiplier": 1.0,
+            "sla_scale": 18,
+            "sla_cap": 45,
+            "recurrence_weight": 3,
+            "affected_divisor": 12,
+            "affected_cap": 15,
+            "effort_weight": 2.5,
+            "vendor_weight": 8,
+        },
+        "User-impact heavy": {
+            "severity_multiplier": 1.0,
+            "sla_scale": 10,
+            "sla_cap": 30,
+            "recurrence_weight": 3,
+            "affected_divisor": 6,
+            "affected_cap": 25,
+            "effort_weight": 4,
+            "vendor_weight": 8,
+        },
+        "Vendor-escalation heavy": {
+            "severity_multiplier": 0.95,
+            "sla_scale": 11,
+            "sla_cap": 32,
+            "recurrence_weight": 4,
+            "affected_divisor": 12,
+            "affected_cap": 15,
+            "effort_weight": 2.5,
+            "vendor_weight": 20,
+        },
+    }
+    active = issues[issues["active_flag"]].copy()
+    current_top = set(active.sort_values("triage_score", ascending=False).head(25)["issue_id"])
+    scenario_rows = []
+    for scenario_name, scenario in scenarios.items():
+        score_col = f"scenario_score_{len(scenario_rows)}"
+        active[score_col] = active.apply(lambda row: scenario_score(row, scenario), axis=1)
+        selected = active.sort_values(score_col, ascending=False).head(25)
+        scenario_rows.append(
+            {
+                "scenario": scenario_name,
+                "top_25_overlap_with_current": len(current_top & set(selected["issue_id"])),
+                "avg_score": round(selected[score_col].mean(), 2),
+                "sla_breach_rate": round(selected["sla_breached"].mean(), 3),
+                "vendor_blocked_share": round(selected["vendor_blocked"].mean(), 3),
+                "avg_customer_effort": round(selected["customer_effort_score"].mean(), 2),
+                "review_required_share": round(selected["review_required"].mean(), 3),
+            }
+        )
+    pd.DataFrame(scenario_rows).to_csv(OUT / "sensitivity_scenarios.csv", index=False, lineterminator="\n")
+
+
 def write_outputs(issues: list[dict], tests: list[dict]) -> None:
     ranked = []
     for issue in issues:
@@ -198,6 +412,7 @@ def write_outputs(issues: list[dict], tests: list[dict]) -> None:
         {"metric": "avg_customer_effort_score", "value": round(sum(float(row["customer_effort_score"]) for row in open_issues) / len(open_issues), 2)},
     ]
     write_csv(OUT / "kpi_snapshot.csv", kpis)
+    write_analysis_depth_outputs(ranked, release_rows)
 
 
 def write_evidence_images() -> None:
@@ -205,6 +420,10 @@ def write_evidence_images() -> None:
     issues = pd.read_csv(OUT / "ranked_issue_queue.csv")
     releases = pd.read_csv(OUT / "release_readiness_summary.csv")
     top_blockers = pd.read_csv(OUT / "top_25_upgrade_blockers.csv")
+    segment_summary = pd.read_csv(OUT / "eda_segment_summary.csv")
+    data_quality = pd.read_csv(OUT / "data_quality_checks.csv")
+    benchmark = pd.read_csv(OUT / "model_vs_rule_benchmark.csv")
+    correlations = pd.read_csv(OUT / "driver_correlations.csv", index_col=0)
 
     app_summary = (
         issues.groupby("application")
@@ -227,6 +446,118 @@ def write_evidence_images() -> None:
         ax.text(value + 0.6, index, f"{value:.1f}", va="center", fontsize=9)
     fig.tight_layout()
     fig.savefig(IMAGES / "triage-score-by-application.png", dpi=180)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    severity_counts = issues["severity"].value_counts().reindex(SEVERITY_ORDER)
+    status_counts = issues["status"].value_counts().reindex(STATUS_ORDER)
+    severity_counts.plot(kind="bar", ax=axes[0], color="#315c74")
+    axes[0].set_title("Issue Volume by Severity", fontsize=13, weight="bold")
+    axes[0].set_xlabel("")
+    axes[0].set_ylabel("Issues")
+    status_counts.plot(kind="bar", ax=axes[1], color="#7a5c2e")
+    axes[1].set_title("Issue Volume by Status", fontsize=13, weight="bold")
+    axes[1].set_xlabel("")
+    axes[1].set_ylabel("Issues")
+    for ax in axes:
+        ax.tick_params(axis="x", rotation=25)
+    fig.suptitle("EDA: Support Queue Distribution", fontsize=15, weight="bold")
+    fig.tight_layout()
+    fig.savefig(IMAGES / "eda-support-queue-distribution.png", dpi=180)
+    plt.close(fig)
+
+    active_issues = issues[issues["status"].isin(ACTIVE_STATUSES)]
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.hist(active_issues["triage_score"], bins=24, color="#315c74", edgecolor="white")
+    q90 = active_issues["triage_score"].quantile(0.9)
+    q95 = active_issues["triage_score"].quantile(0.95)
+    ax.axvline(q90, color="#b04a35", linestyle="--", linewidth=2, label=f"90th percentile: {q90:.1f}")
+    ax.axvline(q95, color="#6b2e6f", linestyle="--", linewidth=2, label=f"95th percentile: {q95:.1f}")
+    ax.set_title("EDA: Active Issue Triage Score Distribution", fontsize=15, weight="bold")
+    ax.set_xlabel("Triage score")
+    ax.set_ylabel("Active issues")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(IMAGES / "eda-triage-score-distribution.png", dpi=180)
+    plt.close(fig)
+
+    pivot = segment_summary.pivot(index="application", columns="user_group", values="avg_triage_score").reindex(APPLICATIONS)
+    fig, ax = plt.subplots(figsize=(11, 6))
+    image = ax.imshow(pivot, cmap="PuBuGn", aspect="auto")
+    ax.set_title("Segment Cut: Average Triage Score by Application and User Group", fontsize=15, weight="bold")
+    ax.set_xticks(range(len(pivot.columns)), pivot.columns, rotation=25, ha="right")
+    ax.set_yticks(range(len(pivot.index)), pivot.index)
+    for row in range(len(pivot.index)):
+        for col in range(len(pivot.columns)):
+            value = pivot.iloc[row, col]
+            ax.text(col, row, f"{value:.1f}", ha="center", va="center", fontsize=8)
+    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(IMAGES / "segment-risk-heatmap.png", dpi=180)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    active_issues.plot.scatter(
+        x="hours_open",
+        y="triage_score",
+        c="customer_effort_score",
+        cmap="viridis",
+        alpha=0.65,
+        ax=axes[0],
+        colorbar=True,
+    )
+    axes[0].set_title("Metric Relationship: Age, Effort, and Score", fontsize=12, weight="bold")
+    axes[0].set_xlabel("Hours open")
+    axes[0].set_ylabel("Triage score")
+    selected_corr = correlations.loc[
+        ["hours_open", "recurrence_count", "affected_users", "customer_effort_score", "vendor_blocked", "pass_rate_gap"],
+        "triage_score",
+    ].sort_values()
+    selected_corr.plot(kind="barh", ax=axes[1], color="#315c74")
+    axes[1].set_title("Correlation with Triage Score", fontsize=12, weight="bold")
+    axes[1].set_xlabel("Correlation")
+    fig.suptitle("EDA: Score Drivers and Metric Relationships", fontsize=15, weight="bold")
+    fig.tight_layout()
+    fig.savefig(IMAGES / "eda-score-driver-relationships.png", dpi=180)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(9.5, 4.8))
+    ax.axis("off")
+    quality_table = data_quality[["table_name", "row_count", "duplicate_key_count", "missing_cell_count"]].copy()
+    table = ax.table(
+        cellText=quality_table.values,
+        colLabels=["Table", "Rows", "Duplicate Keys", "Missing Cells"],
+        loc="center",
+        cellLoc="left",
+        colLoc="left",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.45)
+    for (row, col), cell in table.get_celld().items():
+        if row == 0:
+            cell.set_text_props(weight="bold", color="white")
+            cell.set_facecolor("#315c74")
+        elif row % 2 == 0:
+            cell.set_facecolor("#f2f5f7")
+    ax.set_title("Data Quality Checks Before Triage Scoring", fontsize=15, weight="bold", pad=16)
+    fig.tight_layout()
+    fig.savefig(IMAGES / "data-quality-checks.png", dpi=180)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    x = range(len(benchmark))
+    width = 0.22
+    ax.bar([value - width for value in x], benchmark["precision_at_100"], width=width, label="Precision@100", color="#315c74")
+    ax.bar(x, benchmark["recall_at_100"], width=width, label="Recall@100", color="#b04a35")
+    ax.bar([value + width for value in x], benchmark["vendor_blocked_share_at_100"], width=width, label="Vendor share@100", color="#7a5c2e")
+    ax.set_title("Benchmark: Multi-Signal Score vs Severity + SLA Rule", fontsize=15, weight="bold")
+    ax.set_xticks(list(x), benchmark["method"], rotation=10, ha="right")
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Share")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(IMAGES / "model-vs-rule-benchmark.png", dpi=180)
     plt.close(fig)
 
     heatmap_data = releases.set_index("release_id")[["pass_rate_gap", "open_defects", "not_ready_tests"]]
